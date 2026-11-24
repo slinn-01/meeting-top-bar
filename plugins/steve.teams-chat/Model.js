@@ -27,8 +27,10 @@ function chats(state) {
   return list.filter(function(m) { return m && typeof m.text === "string" && typeof m.time === "number" })
 }
 
-// opts: { hideAfterMinutes (0 = never), dimAfterMinutes, dismissedKey }
-// Returns { msg, key, dim, hidden, unreadCount, tooltip }
+// opts: { hideAfterMinutes (0 = never), dimAfterMinutes, dismissedKey, historyCount }
+// Returns { msg, key, dim, hidden, unreadCount, entries, notes }
+//   entries: [{ from, topic, ago, text, unread, hue }] for the hover dropdown
+//   notes:   warnings (sign-in, staleness, errors) shown under the entries
 function compute(state, now, opts) {
   opts = opts || {}
   var list = chats(state)
@@ -40,17 +42,16 @@ function compute(state, now, opts) {
   var unread = list.filter(function(m) { return m.unread }).length
 
   var hidden = !msg || key === opts.dismissedKey || (hideAfter > 0 && age > hideAfter)
-  var lines = list.map(function(m) {
-    var where = m.topic ? " (" + m.topic + ")" : ""
-    return (m.unread ? "● " : "  ") + ago(m.time, now) + "  " + m.from + where + ": " + m.text
+  var entries = list.slice(0, opts.historyCount || 8).map(function(m) {
+    return { from: String(m.from || "Someone"), topic: String(m.topic || ""), ago: ago(m.time, now),
+             text: m.text, unread: !!m.unread, hue: hue(m.from) }
   })
-  if (!lines.length) lines.push("No recent Teams messages")
-  if (state && state.auth === "needed") lines.unshift("Microsoft 365 sign-in needed", "")
+  var notes = []
+  if (state && state.auth === "needed") notes.push("Microsoft 365 sign-in needed")
   var updated = state && state.updated ? state.updated.chats : 0
   var error = state && state.errors ? state.errors.chats : ""
-  if (updated && now - updated > (opts.staleMinutes || 10) * MIN) lines.push("", "⚠ chats stale since " + new Date(updated).toTimeString().slice(0, 5))
-  if (error) lines.push("", "⚠ " + error)
-  lines.push("", "Click: Teams · Right: open chat · Middle: dismiss")
+  if (updated && now - updated > (opts.staleMinutes || 10) * MIN) notes.push("Chats stale since " + new Date(updated).toTimeString().slice(0, 5))
+  if (error) notes.push(String(error))
 
   return {
     msg: msg,
@@ -58,7 +59,8 @@ function compute(state, now, opts) {
     dim: !msg || !msg.unread || age > dimAfter,
     hidden: hidden,
     unreadCount: unread,
-    tooltip: lines.join("\n")
+    entries: entries,
+    notes: notes
   }
 }
 

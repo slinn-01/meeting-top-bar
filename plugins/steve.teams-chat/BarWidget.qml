@@ -19,7 +19,6 @@ BarWidget {
   // No /tmp fallback: a shared directory would let another user feed the bar.
   readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string statePath: runtimeDir ? runtimeDir + "/m365bar/state.json" : ""
-  readonly property bool tooltipHovered: mouseArea.containsMouse
   readonly property string teamsCommand: setting("teamsCommand",
     "omarchy-launch-or-focus-webapp 'Microsoft Teams' 'https://teams.microsoft.com/v2/'")
   readonly property int maxLabelWidth: Number(setting("maxWidth", 600))
@@ -41,8 +40,20 @@ BarWidget {
   // One instance per monitor; middle click dismisses on all of them.
   function dismiss() { dismissedKey = view.key }
 
-  readonly property string tooltipText: view.tooltip
-  onTooltipTextChanged: if (tooltipHovered && bar) bar.showTooltip(root, tooltipText)
+  // Hover opens our own dropdown under the pill (the bar's tooltip is
+  // centred plain text as wide as the longest message). A short delay keeps
+  // a passing pointer from flashing it.
+  readonly property bool hovered: mouseArea.containsMouse
+  property bool dropdownOpen: false
+  onHoveredChanged: {
+    if (hovered) openDelay.restart()
+    else { openDelay.stop(); dropdownOpen = false }
+  }
+  Timer {
+    id: openDelay
+    interval: 300
+    onTriggered: root.dropdownOpen = root.hovered
+  }
 
   onViewChanged: {
     if (view.hidden) {
@@ -176,11 +187,196 @@ BarWidget {
         root.bar.run(root.teamsCommand)
       }
     }
-    // The bar only shows a tooltip while target.tooltipHovered is true.
-    onContainsMouseChanged: {
-      if (!root.bar) return
-      if (containsMouse) root.bar.showTooltip(root, root.view.tooltip)
-      else root.bar.hideTooltip(root)
+  }
+
+  // Recent messages, right-aligned under the pill and at least dropdownWidth
+  // wide. Passive: it never takes input, so it can't steal bar clicks.
+  PopupWindow {
+    id: dropdown
+
+    readonly property var barWindow: root.QsWindow.window
+    readonly property int pad: Style.space(12)
+    readonly property color text: Commons.Color.tooltip.text
+    readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+
+    visible: root.dropdownOpen && root.visible && !!barWindow
+    color: "transparent"
+    mask: Region {}
+    implicitWidth: Math.round(Math.max(pill.width, Number(root.setting("dropdownWidth", 440))))
+    implicitHeight: Math.ceil(card.implicitHeight)
+
+    anchor {
+      id: dropdownAnchor
+      window: dropdown.barWindow
+      adjustment: PopupAdjustment.Slide
+      edges: Edges.Top | Edges.Left
+      gravity: Edges.Bottom | Edges.Right
+      rect.width: 1
+      rect.height: 1
+
+      onAnchoring: {
+        if (!dropdown.barWindow) return
+        var gap = Style.space(6)
+        var y = root.bar && root.bar.position === "bottom" ? -dropdown.implicitHeight - gap : pill.height + gap
+        var p = dropdown.barWindow.contentItem.mapFromItem(pill, pill.width - dropdown.implicitWidth, y)
+        dropdownAnchor.rect.x = Math.round(p.x)
+        dropdownAnchor.rect.y = Math.round(p.y)
+      }
+    }
+
+    // As the bar's own tooltip does: a fresh popup surface first maps at a
+    // whole-number scale, so stay transparent until it matches the bar's.
+    readonly property bool scaleReady: visible && Math.round(devicePixelRatio * 120) === Math.round(barWindow.devicePixelRatio * 120)
+    property bool revealed: false
+    onVisibleChanged: if (!visible) revealed = false
+    onScaleReadyChanged: if (scaleReady) Qt.callLater(function() {
+      if (dropdown.scaleReady) dropdown.revealed = true
+    })
+
+    Rectangle {
+      id: card
+      width: dropdown.implicitWidth
+      implicitHeight: list.implicitHeight + dropdown.pad * 2
+      opacity: dropdown.revealed ? 1 : 0
+      color: Commons.Color.tooltip.background
+      border.width: 1
+      border.color: Qt.rgba(Commons.Color.tooltip.border.r, Commons.Color.tooltip.border.g, Commons.Color.tooltip.border.b, 0.35)
+      radius: Style.cornerRadius
+
+      Behavior on opacity {
+        NumberAnimation { duration: Style.duration(120); easing.type: Easing.OutCubic }
+      }
+
+      Column {
+        id: list
+        x: dropdown.pad
+        y: dropdown.pad
+        width: parent.width - dropdown.pad * 2
+        spacing: Style.space(12)
+
+        Repeater {
+          model: root.view.entries
+
+          delegate: Column {
+            id: entry
+            required property var modelData
+            width: list.width
+            spacing: Style.space(3)
+            opacity: modelData.unread ? 1 : 0.7
+
+            // Header: ● Name · topic ........ 5m
+            Item {
+              width: parent.width
+              height: nameLabel.implicitHeight
+
+              Rectangle {
+                id: unreadDot
+                visible: entry.modelData.unread
+                width: Style.space(6)
+                height: width
+                radius: width / 2
+                color: Commons.Color.accent
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: nameLabel
+                x: unreadDot.visible ? unreadDot.width + Style.space(6) : 0
+                textFormat: Text.PlainText
+                text: entry.modelData.from
+                color: Qt.hsla(entry.modelData.hue, 0.55, 0.68, 1)
+                font.family: dropdown.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+
+              Text {
+                anchors.left: nameLabel.right
+                anchors.leftMargin: Style.space(6)
+                anchors.right: agoLabel.left
+                anchors.rightMargin: Style.space(8)
+                anchors.baseline: nameLabel.baseline
+                textFormat: Text.PlainText
+                text: entry.modelData.topic ? "in " + entry.modelData.topic : ""
+                elide: Text.ElideRight
+                color: dropdown.text
+                opacity: 0.55
+                font.family: dropdown.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                id: agoLabel
+                anchors.right: parent.right
+                anchors.baseline: nameLabel.baseline
+                textFormat: Text.PlainText
+                text: entry.modelData.ago
+                color: dropdown.text
+                opacity: 0.55
+                font.family: dropdown.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            Text {
+              x: nameLabel.x
+              width: parent.width - x
+              textFormat: Text.PlainText
+              text: entry.modelData.text
+              wrapMode: Text.Wrap
+              maximumLineCount: 3
+              elide: Text.ElideRight
+              lineHeight: 1.15
+              color: dropdown.text
+              font.family: dropdown.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+        }
+
+        Text {
+          visible: root.view.entries.length === 0
+          textFormat: Text.PlainText
+          text: "No recent Teams messages"
+          color: dropdown.text
+          opacity: 0.6
+          font.family: dropdown.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Repeater {
+          model: root.view.notes
+          delegate: Text {
+            required property var modelData
+            width: list.width
+            textFormat: Text.PlainText
+            text: "⚠ " + modelData
+            wrapMode: Text.Wrap
+            color: Commons.Color.urgent
+            font.family: dropdown.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
+
+        Rectangle {
+          width: list.width
+          height: 1
+          color: dropdown.text
+          opacity: 0.12
+        }
+
+        Text {
+          width: list.width
+          textFormat: Text.PlainText
+          text: "Click: Teams   ·   Right-click: open chat   ·   Middle-click: dismiss"
+          elide: Text.ElideRight
+          horizontalAlignment: Text.AlignHCenter
+          color: dropdown.text
+          opacity: 0.45
+          font.family: dropdown.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
     }
   }
 }

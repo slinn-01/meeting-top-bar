@@ -37,6 +37,17 @@ function safeJoin(url) {
   return typeof url === "string" && url.length < 2048 && JOIN_RE.test(url) ? url : ""
 }
 
+// A Teams meeting link opened as-is lands on the "open the desktop app?"
+// launcher. The same path under the web client's /_#/ route goes straight to
+// the in-browser pre-join screen, so it can open as a Teams web-app window.
+// Returns "" for anything that isn't a teams.microsoft.com meeting link.
+var TEAMS_MEETING_RE = /^https:\/\/teams\.microsoft\.com(\/l\/meetup-join\/[^\s'"`\\#]*)$/i
+
+function teamsWebJoin(url) {
+  var m = TEAMS_MEETING_RE.exec(safeJoin(url))
+  return m ? "https://teams.microsoft.com/_#" + m[1] : ""
+}
+
 function rank(e) {
   // Prefer meetings I accepted / organize over tentative ones.
   if (e.response === "organizer" || e.response === "accepted") return 2
@@ -162,4 +173,4 @@ function tag(e) {
   return t.length ? "  [" + t.join(", ") + "]" : ""
 }
 
-if (typeof module !== "undefined") module.exports = { compute: compute, dur: dur, safeJoin: safeJoin }
+if (typeof module !== "undefined") module.exports = { compute: compute, dur: dur, safeJoin: safeJoin, teamsWebJoin: teamsWebJoin }

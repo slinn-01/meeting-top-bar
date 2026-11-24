@@ -19,7 +19,7 @@ Graph ──(m365bar daemon, systemd --user)──► $XDG_RUNTIME_DIR/m365bar/s
 
 Each feed polls, backs off, and honors Graph's `Retry-After` independently. The state file is
 rewritten only when something changes (plus a 2-minute heartbeat), and carries per-feed
-`updated`/`errors` so each widget's tooltip can flag stale data.
+`updated`/`errors` so each widget's hover view can flag stale data.
 
 ## Why Graph instead of ICS
 
@@ -62,19 +62,20 @@ Clicking the bar while it says "M365 sign-in needed" also runs `m365bar login`.
 | `tests/model.test.js` | `node tests/model.test.js` |
 | `tests/demo-state.py` | `incall \| soon \| later \| auth \| empty` fake state for UI checks |
 
-Re-run `./install.sh` after editing the plugins (the shell hot-reloads them).
+Re-run `./install.sh` after editing the plugins, then `omarchy restart shell`. The shell
+notices plugin changes but can keep running the old widget code until it restarts.
 
 ## Widget settings (`shell.json`, via `omarchy bar set <id> <key> <value>`)
 
 - meetings: `soonMinutes` 15, `urgentMinutes` 5, `joinLeadMinutes` 10, `rotateSeconds` 6,
   `maxWidth` 380, `showWhenEmpty` true, `calendarCommand`
 - teams-chat: `maxWidth` 600, `dimAfterMinutes` 10, `hideAfterMinutes` 0 (never),
-  `pillOpacity` 0.85, `teamsCommand`
+  `pillOpacity` 0.85, `dropdownWidth` 440 (minimum width of the hover list), `teamsCommand`
 
 ## Safety notes
 
 Meeting subjects and chat text come from other people, including external senders. All text sinks
-are `Text.PlainText` and the shared tooltip is plain text. Join and chat URLs are host-allowlisted
+are `Text.PlainText`, including the meetings tooltip and the chat hover list. Join and chat URLs are host-allowlisted
 (Teams/Zoom/Meet/Webex/GoTo, https only) in both the daemon and the QML, and launched with
 `Util.execArgv`, so they are passed as an argument and never parsed by a shell. The state file
 lives only under `$XDG_RUNTIME_DIR` (no `/tmp` fallback).

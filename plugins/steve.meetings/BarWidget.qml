@@ -54,6 +54,14 @@ BarWidget {
   // Keep an open tooltip current as countdowns tick (fires only on real change).
   readonly property string tooltipText: view.tooltip
   onTooltipTextChanged: if (tooltipHovered && bar) bar.showTooltip(root, tooltipText)
+  // React to tooltipHovered itself, not the MouseArea signal: the bar re-checks
+  // target.tooltipHovered, and from containsMouseChanged that binding may not
+  // have updated yet, so the tooltip was silently dropped.
+  onTooltipHoveredChanged: {
+    if (!bar) return
+    if (tooltipHovered) bar.showTooltip(root, tooltipText)
+    else bar.hideTooltip(root)
+  }
 
   onSlideChanged: {
     var key = keyOf(slide)
@@ -77,8 +85,11 @@ BarWidget {
     var url = Model.safeJoin(view.joinUrl)
     if (!url) return
     // Argv, not a shell string: the URL came from a meeting invite.
-    var teams = /^https:\/\/teams\.(microsoft|live)\.com\//i.test(url)
-    Util.execArgv([teams ? "omarchy-launch-webapp" : "xdg-open", url])
+    // Teams meetings open straight into the web pre-join screen in a Teams
+    // web-app window (same browser profile, so already signed in).
+    var web = Model.teamsWebJoin(url)
+    var teams = web || /^https:\/\/teams\.(microsoft|live)\.com\//i.test(url)
+    Util.execArgv([teams ? "omarchy-launch-webapp" : "xdg-open", web || url])
   }
 
   visible: !vertical && (view.slides.length > 0 || (showWhenEmpty && view.status === "none"))
@@ -195,12 +206,6 @@ BarWidget {
       else if (mouse.button === Qt.RightButton) root.join()
       else if (root.view.status === "auth") root.signIn()
       else root.bar.run(root.calendarCommand)
-    }
-    // The bar only shows a tooltip while target.tooltipHovered is true.
-    onContainsMouseChanged: {
-      if (!root.bar) return
-      if (containsMouse) root.bar.showTooltip(root, root.view.tooltip)
-      else root.bar.hideTooltip(root)
     }
   }
 }
