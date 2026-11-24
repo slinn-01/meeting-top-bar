@@ -46,6 +46,10 @@ function compute(state, now, opts) {
   })
   if (!lines.length) lines.push("No recent Teams messages")
   if (state && state.auth === "needed") lines.unshift("Microsoft 365 sign-in needed", "")
+  var updated = state && state.updated ? state.updated.chats : 0
+  var error = state && state.errors ? state.errors.chats : ""
+  if (updated && now - updated > (opts.staleMinutes || 10) * MIN) lines.push("", "⚠ chats stale since " + new Date(updated).toTimeString().slice(0, 5))
+  if (error) lines.push("", "⚠ " + error)
   lines.push("", "Click: Teams · Right: open chat · Middle: dismiss")
 
   return {

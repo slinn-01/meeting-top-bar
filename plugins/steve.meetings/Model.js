@@ -136,8 +136,10 @@ function compute(state, now, opts) {
     })
   }
   if (!lines.length) lines.push("No meetings in the next " + (opts.lookaheadHours || 18) + "h")
-  if (state.updated && now - state.updated > staleAfter) lines.push("", "⚠ data stale since " + clock(state.updated))
-  if (state.error) lines.push("", "⚠ " + state.error)
+  var updated = (state.updated || {}).calendar
+  var error = (state.errors || {}).calendar
+  if (updated && now - updated > staleAfter) lines.push("", "⚠ calendar stale since " + clock(updated))
+  if (error) lines.push("", "⚠ " + error)
   lines.push("", "Click: calendar · Right: join" + (joinUrl ? "" : " (none)") + " · Middle: refresh")
 
   return {

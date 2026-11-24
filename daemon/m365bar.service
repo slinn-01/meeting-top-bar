@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 ExecStart=%h/.local/bin/m365bar run
 Restart=on-failure
+# uv reports a SIGTERM'd child as 143; a normal stop is not a failure.
+SuccessExitStatus=143
 RestartSec=30
 Nice=10
 

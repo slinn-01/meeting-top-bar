@@ -16,7 +16,10 @@ BarWidget {
   id: root
   moduleName: "steve.teams-chat"
 
-  readonly property string statePath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/m365bar/state.json"
+  // No /tmp fallback: a shared directory would let another user feed the bar.
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
+  readonly property string statePath: runtimeDir ? runtimeDir + "/m365bar/state.json" : ""
+  readonly property bool tooltipHovered: mouseArea.containsMouse
   readonly property string teamsCommand: setting("teamsCommand",
     "omarchy-launch-or-focus-webapp 'Microsoft Teams' 'https://teams.microsoft.com/v2/'")
   readonly property int maxLabelWidth: Number(setting("maxWidth", 600))
@@ -34,6 +37,12 @@ BarWidget {
   // Message on screen; swapped through the slide-in when a new one lands.
   property var shown: null
   property string shownKey: ""
+
+  // One instance per monitor; middle click dismisses on all of them.
+  function dismiss() { dismissedKey = view.key }
+
+  readonly property string tooltipText: view.tooltip
+  onTooltipTextChanged: if (tooltipHovered && bar) bar.showTooltip(root, tooltipText)
 
   onViewChanged: {
     if (view.hidden) {
@@ -71,15 +80,19 @@ BarWidget {
     onFileChanged: reload()
   }
 
+  // Age/dim tick; the slow reload only covers a lost file watch.
   Timer {
     interval: 5000
     running: true
     repeat: true
-    triggeredOnStart: true
-    onTriggered: {
-      root.now = Date.now()
-      stateFile.reload()
-    }
+    onTriggered: root.now = Date.now()
+  }
+
+  Timer {
+    interval: 30000
+    running: root.statePath !== ""
+    repeat: true
+    onTriggered: stateFile.reload()
   }
 
   ParallelAnimation {
@@ -144,6 +157,7 @@ BarWidget {
   }
 
   MouseArea {
+    id: mouseArea
     anchors.fill: parent
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
@@ -152,16 +166,21 @@ BarWidget {
     onClicked: function(mouse) {
       if (!root.bar) return
       if (mouse.button === Qt.MiddleButton) {
-        root.dismissedKey = root.view.key
+        root.broadcast("dismiss")
       } else if (mouse.button === Qt.RightButton) {
+        // Argv, not a shell string: the URL came from Graph.
         var url = root.shown ? String(root.shown.webUrl || "") : ""
-        if (/^https:\/\/teams\.microsoft\.com\/[^\s'"`\\]*$/.test(url)) root.bar.run("omarchy-launch-webapp " + Util.shellQuote(url))
+        if (/^https:\/\/teams\.microsoft\.com\/[^\s'"`\\<>]*$/.test(url)) Util.execArgv(["omarchy-launch-webapp", url])
         else root.bar.run(root.teamsCommand)
       } else {
         root.bar.run(root.teamsCommand)
       }
     }
-    onEntered: if (root.bar) root.bar.showTooltip(root, root.view.tooltip)
-    onExited: if (root.bar) root.bar.hideTooltip(root)
+    // The bar only shows a tooltip while target.tooltipHovered is true.
+    onContainsMouseChanged: {
+      if (!root.bar) return
+      if (containsMouse) root.bar.showTooltip(root, root.view.tooltip)
+      else root.bar.hideTooltip(root)
+    }
   }
 }

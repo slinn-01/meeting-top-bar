@@ -9,7 +9,7 @@ and write a small JSON state file for the Omarchy bar widgets to read.
     m365bar.py login     device-code sign-in (once; refresh token is cached)
     m365bar.py run       poll forever (what the systemd user service runs)
     m365bar.py once      poll once and print the state
-    m365bar.py logout    forget the cached tokens
+    m365bar.py logout    stop the service and forget the cached tokens
 
 SIGUSR1 to a running `run` forces an immediate refresh (bar middle-click).
 """
@@ -18,9 +18,11 @@ from __future__ import annotations
 import html
 import json
 import os
+import random
 import re
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -37,8 +39,6 @@ SCOPES = ["User.Read", "Calendars.Read", "Chat.Read", "Presence.Read"]
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "m365bar" / "config.toml"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "m365bar"
 TOKEN_CACHE = STATE_DIR / "token_cache.json"
-RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "m365bar"
-OUT_PATH = RUNTIME_DIR / "state.json"
 
 DEFAULTS = {
     "client_id": "",
@@ -51,13 +51,28 @@ DEFAULTS = {
     "include_tentative": True,
     "chat_history": 8,           # messages kept for the tooltip
 }
+BOUNDS = {
+    "lookahead_hours": (1, 168),
+    "calendar_interval": (15, 3600),
+    "chat_interval": (5, 3600),
+    "presence_interval": (10, 3600),
+    "chat_history": (1, 50),
+}
 
 MAX_TEXT = 400
 MAX_NAME = 60
+MAX_PAGES = 3
+HEARTBEAT = 120  # rewrite unchanged state this often so widgets can judge freshness
 
 
 class AuthNeeded(Exception):
     pass
+
+
+class Throttled(Exception):
+    def __init__(self, retry_after: int):
+        super().__init__(f"throttled, retry after {retry_after}s")
+        self.retry_after = retry_after
 
 
 def log(*a):
@@ -69,9 +84,26 @@ def load_config() -> dict:
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("rb") as f:
             cfg.update(tomllib.load(f))
-    if not cfg["client_id"]:
-        sys.exit(f"m365bar: set client_id in {CONFIG_PATH} (see README)")
+    problems = []
+    if not isinstance(cfg["client_id"], str) or not cfg["client_id"]:
+        problems.append("client_id must be set (see README)")
+    for key, (lo, hi) in BOUNDS.items():
+        v = cfg[key]
+        if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+            problems.append(f"{key} must be an integer in {lo}..{hi}")
+    for key in ("include_free", "include_tentative"):
+        if not isinstance(cfg[key], bool):
+            problems.append(f"{key} must be true or false")
+    if problems:
+        sys.exit(f"m365bar: bad {CONFIG_PATH}:\n  " + "\n  ".join(problems))
     return cfg
+
+
+def runtime_state_path() -> Path:
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime:
+        sys.exit("m365bar: XDG_RUNTIME_DIR is not set")
+    return Path(runtime) / "m365bar" / "state.json"
 
 
 # ---------------------------------------------------------------- auth
@@ -90,11 +122,7 @@ class Auth:
 
     def _save(self):
         if self.cache.has_state_changed:
-            tmp = TOKEN_CACHE.with_suffix(".tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-            with os.fdopen(fd, "w") as f:
-                f.write(self.cache.serialize())
-            os.replace(tmp, TOKEN_CACHE)
+            write_private(TOKEN_CACHE, self.cache.serialize())
 
     def token(self) -> str:
         accounts = self.app.get_accounts()
@@ -115,8 +143,12 @@ class Auth:
             sys.exit(f"login failed: {result.get('error_description')}")
         print(f"signed in as {result.get('id_token_claims', {}).get('preferred_username', '?')}")
 
-    def logout(self):
-        TOKEN_CACHE.unlink(missing_ok=True)
+
+def logout():
+    # The service holds tokens in memory, so stop it before dropping the cache.
+    subprocess.run(["systemctl", "--user", "stop", "m365bar.service"], check=False)
+    TOKEN_CACHE.unlink(missing_ok=True)
+    print("m365bar service stopped and tokens removed; `m365bar login` then start the service again")
 
 
 # ---------------------------------------------------------------- graph
@@ -126,17 +158,28 @@ class Graph:
         self.auth = auth
         self.s = requests.Session()
 
-    def get(self, path: str, params=None, headers=None) -> dict:
+    def get(self, url: str, params=None, headers=None) -> dict:
+        if not url.startswith(GRAPH + "/"):
+            url = GRAPH + url
         h = {"Authorization": f"Bearer {self.auth.token()}"}
         h.update(headers or {})
-        r = self.s.get(GRAPH + path, params=params, headers=h, timeout=20)
+        r = self.s.get(url, params=params, headers=h, timeout=20)
         if r.status_code == 401:
             raise AuthNeeded(r.text[:200])
         if r.status_code == 429:
-            retry = int(r.headers.get("Retry-After", "30"))
-            raise RuntimeError(f"throttled, retry after {retry}s")
+            raise Throttled(int(r.headers.get("Retry-After", "60")))
         r.raise_for_status()
         return r.json()
+
+    def items(self, path: str, params=None, headers=None):
+        """Yield collection items, following @odata.nextLink up to MAX_PAGES."""
+        data = self.get(path, params=params, headers=headers)
+        for page in range(MAX_PAGES):
+            yield from data.get("value", [])
+            nxt = data.get("@odata.nextLink")
+            if page + 1 == MAX_PAGES or not isinstance(nxt, str) or not nxt.startswith(GRAPH + "/"):
+                return
+            data = self.get(nxt, headers=headers)
 
 
 def ms(dt_str: str | None) -> int | None:
@@ -158,30 +201,29 @@ def clip(s, n=MAX_TEXT) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+UNSAFE_URL_CHARS = re.compile(r"[\s'\"`\\<>]")
 JOIN_HOSTS = re.compile(
     r"^https://([a-z0-9-]+\.)*(teams\.microsoft\.com|teams\.live\.com|zoom\.us|meet\.google\.com|webex\.com|gotomeeting\.com)(/|$)",
     re.I,
 )
 
 
-def safe_url(u) -> str:
+def safe_url(u, host_re=JOIN_HOSTS) -> str:
     u = str(u or "")
-    return u if JOIN_HOSTS.match(u) and len(u) < 2048 and not re.search(r"[\s'\"`\\]", u) else ""
+    return u if len(u) < 2048 and host_re.match(u) and not UNSAFE_URL_CHARS.search(u) else ""
 
 
-def fetch_calendar(g: Graph, cfg: dict) -> list[dict]:
+def fetch_calendar(g: Graph, cfg: dict, my_id: str) -> list[dict]:
     now = datetime.now(timezone.utc)
     params = {
         "startDateTime": (now - timedelta(hours=12)).isoformat(),
         "endDateTime": (now + timedelta(hours=cfg["lookahead_hours"])).isoformat(),
-        "$select": "subject,start,end,isAllDay,isCancelled,showAs,responseStatus,"
-                   "isOnlineMeeting,onlineMeeting,location,organizer,webLink,isOrganizer",
+        "$select": "subject,start,end,isAllDay,isCancelled,showAs,responseStatus,onlineMeeting,location",
         "$orderby": "start/dateTime",
         "$top": "100",
     }
-    data = g.get("/me/calendarView", params=params, headers={"Prefer": 'outlook.timezone="UTC"'})
     out = []
-    for e in data.get("value", []):
+    for e in g.items("/me/calendarView", params=params, headers={"Prefer": 'outlook.timezone="UTC"'}):
         if e.get("isCancelled") or e.get("isAllDay"):
             continue
         response = (e.get("responseStatus") or {}).get("response", "none")
@@ -192,7 +234,8 @@ def fetch_calendar(g: Graph, cfg: dict) -> list[dict]:
             continue
         if response == "tentativelyAccepted" and not cfg["include_tentative"]:
             continue
-        join = safe_url((e.get("onlineMeeting") or {}).get("joinUrl")) or safe_url((e.get("location") or {}).get("locationUri"))
+        location = e.get("location") or {}
+        join = safe_url((e.get("onlineMeeting") or {}).get("joinUrl")) or safe_url(location.get("locationUri"))
         out.append({
             "subject": clip(e.get("subject") or "(no title)", 200),
             "start": ms((e.get("start") or {}).get("dateTime")),
@@ -201,8 +244,7 @@ def fetch_calendar(g: Graph, cfg: dict) -> list[dict]:
             "response": response,
             "online": bool(join),
             "joinUrl": join,
-            "location": clip((e.get("location") or {}).get("displayName"), 120),
-            "organizer": clip(((e.get("organizer") or {}).get("emailAddress") or {}).get("name"), MAX_NAME),
+            "location": clip(location.get("displayName"), 120),
         })
     return out
 
@@ -228,36 +270,36 @@ def plain(body: dict | None) -> str:
     return clip(text)
 
 
+TEAMS_CHAT = re.compile(r"^https://teams\.microsoft\.com/")
+
+
 def fetch_chats(g: Graph, cfg: dict, my_id: str) -> list[dict]:
     params = {
         "$expand": "lastMessagePreview",
         "$orderby": "lastMessagePreview/createdDateTime desc",
         "$top": "25",
     }
-    data = g.get("/me/chats", params=params)
     out = []
-    for c in data.get("value", []):
+    for c in g.items("/me/chats", params=params):
         m = c.get("lastMessagePreview") or {}
         if not m or m.get("isDeleted") or m.get("messageType") != "message":
             continue
-        user = ((m.get("from") or {}).get("user") or {})
+        user = (m.get("from") or {}).get("user") or {}
         if not user or user.get("id") == my_id:
             continue
         text = plain(m.get("body"))
         if not text:
             continue
         created = ms(m.get("createdDateTime"))
-        read_at = ms(((c.get("viewpoint") or {}).get("lastMessageReadDateTime")))
-        web = str(c.get("webUrl") or "")
+        read_at = ms((c.get("viewpoint") or {}).get("lastMessageReadDateTime"))
         out.append({
             "chatId": clip(c.get("id"), 200),
-            "chatType": c.get("chatType", ""),
             "topic": clip(c.get("topic"), MAX_NAME),
             "from": clip(user.get("displayName") or "Someone", MAX_NAME),
             "text": text,
             "time": created,
             "unread": bool(created and (read_at is None or read_at < created)),
-            "webUrl": web if web.startswith("https://teams.microsoft.com/") and not re.search(r"[\s'\"`\\]", web) else "",
+            "webUrl": safe_url(c.get("webUrl"), TEAMS_CHAT),
         })
         if len(out) >= cfg["chat_history"]:
             break
@@ -265,87 +307,110 @@ def fetch_chats(g: Graph, cfg: dict, my_id: str) -> list[dict]:
     return out
 
 
-def fetch_presence(g: Graph) -> dict:
-    p = g.get("/me/presence")
-    return {"availability": p.get("availability", ""), "activity": p.get("activity", "")}
+def fetch_presence(g: Graph, cfg: dict, my_id: str) -> dict:
+    return {"activity": g.get("/me/presence").get("activity", "")}
 
 
 # ---------------------------------------------------------------- state
 
-def write_state(state: dict):
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = OUT_PATH.with_suffix(".tmp")
+def write_private(path: Path, text: str):
+    tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
     with os.fdopen(fd, "w") as f:
-        json.dump(state, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, OUT_PATH)
+        f.write(text)
+    os.replace(tmp, path)
+
+
+# name -> (fetcher, state key, interval config key)
+FEEDS = {
+    "calendar": (fetch_calendar, "events", "calendar_interval"),
+    "chats": (fetch_chats, "chats", "chat_interval"),
+    "presence": (fetch_presence, "presence", "presence_interval"),
+}
 
 
 def run(cfg: dict, once=False):
+    out_path = runtime_state_path()
+    out_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     auth = Auth(cfg)
     g = Graph(auth)
     wake = threading.Event()
     signal.signal(signal.SIGUSR1, lambda *_: wake.set())
 
-    state = {"version": 1, "auth": "ok", "error": "", "updated": 0,
-             "events": [], "chats": [], "presence": {}}
-    last = {"calendar": 0.0, "chat": 0.0, "presence": 0.0}
+    data = {"events": [], "chats": [], "presence": {}}
+    feeds = {name: {"next": 0.0, "updated": 0, "error": "", "fails": 0} for name in FEEDS}
+    auth_state = "ok"
     my_id = ""
-    backoff = 0
+    last_content, last_write = None, 0.0
 
     while True:
         forced = wake.is_set()
         wake.clear()
-        now = time.monotonic()
         try:
             if not my_id:
                 my_id = g.get("/me", params={"$select": "id"})["id"]
-            if forced or now - last["calendar"] >= cfg["calendar_interval"]:
-                state["events"] = fetch_calendar(g, cfg)
-                last["calendar"] = now
-            if forced or now - last["chat"] >= cfg["chat_interval"]:
-                state["chats"] = fetch_chats(g, cfg, my_id)
-                last["chat"] = now
-            if forced or now - last["presence"] >= cfg["presence_interval"]:
+            # Each feed fails, backs off, and honors Retry-After on its own so
+            # one broken endpoint never starves the others.
+            for name, (fetch, key, interval_key) in FEEDS.items():
+                f = feeds[name]
+                now = time.monotonic()
+                if not forced and now < f["next"]:
+                    continue
                 try:
-                    state["presence"] = fetch_presence(g)
-                except requests.HTTPError as e:  # presence is optional
-                    log("presence:", e)
-                last["presence"] = now
-            state.update(auth="ok", error="", updated=int(time.time() * 1000))
-            backoff = 0
+                    data[key] = fetch(g, cfg, my_id)
+                    f.update(updated=int(time.time() * 1000), error="", fails=0, next=now + cfg[interval_key])
+                except Throttled as e:
+                    log(f"{name}:", e)
+                    f.update(error=str(e), next=now + e.retry_after + random.uniform(1, 5))
+                except AuthNeeded:
+                    raise
+                except Exception as e:  # network blips: keep last good data, flag it
+                    log(f"{name}:", e)
+                    f["fails"] += 1
+                    f.update(error=clip(str(e), 200), next=now + min(300, 15 * 2 ** (f["fails"] - 1)))
+            auth_state = "ok"
         except AuthNeeded as e:
             log("auth needed:", e)
-            state.update(auth="needed", error="Sign-in needed: run m365bar login")
-            my_id = ""
-            # `m365bar login` runs in another process; pick up its cache.
+            auth_state, my_id = "needed", ""
+            # `m365bar login` runs in another process; pick up its cache next time.
             auth = Auth(cfg)
             g.auth = auth
-            backoff = 15
-        except Exception as e:  # network blips: keep last good data, flag it
-            log("error:", e)
-            state["error"] = clip(str(e), 200)
-            backoff = min(300, max(15, backoff * 2))
-        write_state(state)
+            for f in feeds.values():
+                f["next"] = time.monotonic() + 15
+        except Exception as e:  # the /me lookup itself failed
+            log("me:", e)
+            for f in feeds.values():
+                f.update(error=clip(str(e), 200), next=time.monotonic() + 30)
+
+        state = {
+            "version": 2,
+            "auth": auth_state,
+            **data,
+            "errors": {n: f["error"] for n, f in feeds.items()},
+        }
+        content = json.dumps(state, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        if content != last_content or time.monotonic() - last_write >= HEARTBEAT or once:
+            state["updated"] = {n: f["updated"] for n, f in feeds.items()}
+            write_private(out_path, json.dumps(state, ensure_ascii=False, separators=(",", ":")))
+            last_content, last_write = content, time.monotonic()
         if once:
             print(json.dumps(state, indent=2, ensure_ascii=False))
             return
-        wake.wait(timeout=backoff or 5)
+        next_due = min(f["next"] for f in feeds.values())
+        wake.wait(timeout=min(HEARTBEAT, max(1.0, next_due - time.monotonic())))
 
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if cmd not in ("login", "logout", "once", "run"):
+        sys.exit(__doc__)
+    if cmd == "logout":
+        return logout()
     cfg = load_config()
     if cmd == "login":
         Auth(cfg).login()
-    elif cmd == "logout":
-        Auth(cfg).logout()
-    elif cmd == "once":
-        run(cfg, once=True)
-    elif cmd == "run":
-        run(cfg)
     else:
-        sys.exit(__doc__)
+        run(cfg, once=(cmd == "once"))
 
 
 if __name__ == "__main__":

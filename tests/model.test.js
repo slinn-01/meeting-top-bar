@@ -51,8 +51,14 @@ assert.equal(M.safeJoin("https://us02web.zoom.us/j/123"), "https://us02web.zoom.
 assert.equal(M.dur(1), "1m"); assert.equal(M.dur(80 * m), "1h 20m"); assert.equal(M.dur(120 * m), "2h")
 
 // stale + error surfaced in tooltip
-v = M.compute(st([], { updated: now - 30 * m, error: "boom" }), now)
-assert.match(v.tooltip, /stale/); assert.match(v.tooltip, /boom/)
+v = M.compute(st([], { updated: { calendar: now - 30 * m }, errors: { calendar: "boom" } }), now)
+assert.match(v.tooltip, /calendar stale/); assert.match(v.tooltip, /boom/)
+v = M.compute(st([], { updated: { calendar: now - 1 * m }, errors: { chats: "chat-only" } }), now)
+assert.doesNotMatch(v.tooltip, /stale|chat-only/)
+
+// current meeting stays visible (accent) however long is left; urgent near the end
+assert.equal(M.compute(st([ev("Long", -10, 120)]), now).slides[0].level, "accent")
+assert.equal(M.compute(st([ev("Ending", -50, 3)]), now).slides[0].level, "urgent")
 
 // chat
 const msg = (id, ago, x = {}) => ({ chatId: id, from: "Alex Example", text: "hi", time: now - ago * m, unread: true, ...x })
@@ -65,4 +71,6 @@ assert.equal(C.compute({ chats: [msg("a", 20)] }, now).dim, true)
 assert.equal(C.compute({ chats: [msg("a", 90)] }, now, { hideAfterMinutes: 60 }).hidden, true)
 assert.equal(C.compute(null, now).hidden, true)
 assert.equal(C.hue("Alex"), C.hue("Alex"))
+c = C.compute({ chats: [msg("a", 1)], updated: { chats: now - 30 * m }, errors: { chats: "throttled" } }, now)
+assert.match(c.tooltip, /chats stale/); assert.match(c.tooltip, /throttled/)
 console.log("all model tests passed")

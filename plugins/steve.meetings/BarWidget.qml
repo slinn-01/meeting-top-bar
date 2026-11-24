@@ -16,7 +16,10 @@ BarWidget {
   id: root
   moduleName: "steve.meetings"
 
-  readonly property string statePath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/m365bar/state.json"
+  // No /tmp fallback: a shared directory would let another user feed the bar.
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
+  readonly property string statePath: runtimeDir ? runtimeDir + "/m365bar/state.json" : ""
+  readonly property bool tooltipHovered: mouseArea.containsMouse
   readonly property string calendarCommand: setting("calendarCommand",
     "omarchy-launch-or-focus-webapp 'Calendar.*Outlook' 'https://outlook.cloud.microsoft/calendar/view/day'")
   readonly property int maxLabelWidth: Number(setting("maxWidth", 380))
@@ -48,6 +51,10 @@ BarWidget {
     return fg
   }
 
+  // Keep an open tooltip current as countdowns tick (fires only on real change).
+  readonly property string tooltipText: view.tooltip
+  onTooltipTextChanged: if (tooltipHovered && bar) bar.showTooltip(root, tooltipText)
+
   onSlideChanged: {
     var key = keyOf(slide)
     if (shown && slide && key !== shownKey && Style.duration(180) > 0) {
@@ -59,8 +66,7 @@ BarWidget {
   }
 
   function refresh() {
-    bar.run("systemctl --user kill -s USR1 m365bar.service")
-    stateFile.reload()
+    Util.execArgv(["systemctl", "--user", "kill", "-s", "USR1", "m365bar.service"])
   }
 
   function signIn() {
@@ -70,8 +76,9 @@ BarWidget {
   function join() {
     var url = Model.safeJoin(view.joinUrl)
     if (!url) return
-    if (/^https:\/\/teams\.(microsoft|live)\.com\//i.test(url)) bar.run("omarchy-launch-webapp " + Util.shellQuote(url))
-    else bar.run("xdg-open " + Util.shellQuote(url))
+    // Argv, not a shell string: the URL came from a meeting invite.
+    var teams = /^https:\/\/teams\.(microsoft|live)\.com\//i.test(url)
+    Util.execArgv([teams ? "omarchy-launch-webapp" : "xdg-open", url])
   }
 
   visible: !vertical && (view.slides.length > 0 || (showWhenEmpty && view.status === "none"))
@@ -94,17 +101,21 @@ BarWidget {
     onFileChanged: reload()
   }
 
-  // Countdown tick, and a reload in case the watch was lost when the daemon
-  // replaced the file.
+  // Countdown tick. The file watch delivers updates; the slow reload only
+  // covers a watch lost when the daemon atomically replaces the file (and the
+  // daemon starting after the shell).
   Timer {
     interval: 5000
     running: true
     repeat: true
-    triggeredOnStart: true
-    onTriggered: {
-      root.now = Date.now()
-      stateFile.reload()
-    }
+    onTriggered: root.now = Date.now()
+  }
+
+  Timer {
+    interval: 30000
+    running: root.statePath !== ""
+    repeat: true
+    onTriggered: stateFile.reload()
   }
 
   Timer {
@@ -172,6 +183,7 @@ BarWidget {
   }
 
   MouseArea {
+    id: mouseArea
     anchors.fill: parent
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
@@ -184,7 +196,11 @@ BarWidget {
       else if (root.view.status === "auth") root.signIn()
       else root.bar.run(root.calendarCommand)
     }
-    onEntered: if (root.bar) root.bar.showTooltip(root, root.view.tooltip)
-    onExited: if (root.bar) root.bar.hideTooltip(root)
+    // The bar only shows a tooltip while target.tooltipHovered is true.
+    onContainsMouseChanged: {
+      if (!root.bar) return
+      if (containsMouse) root.bar.showTooltip(root, root.view.tooltip)
+      else root.bar.hideTooltip(root)
+    }
   }
 }
