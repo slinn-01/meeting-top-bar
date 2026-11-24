@@ -40,8 +40,11 @@ v = M.compute(st([ev("A", 24 * 60, 24 * 60 + 30)]), now); assert.equal(v.slides[
 assert.equal(v.joinUrl, "")  // too far out to offer join
 
 // ad-hoc call from presence with no calendar event
-v = M.compute(st([], { presence: { activity: "InACall" } }), now)
+v = M.compute(st([], { presence: { activity: "InACall" }, updated: { presence: now - m } }), now)
 assert.equal(v.slides[0].text, "In a call"); assert.equal(v.status, "current")
+// stale presence is ignored, and its error is surfaced
+v = M.compute(st([], { presence: { activity: "InACall" }, updated: { presence: now - 20 * m }, errors: { presence: "timeout" } }), now)
+assert.equal(v.status, "none"); assert.match(v.tooltip, /presence: timeout/)
 
 // join URL allowlist rejects junk and shell metacharacters
 assert.equal(M.safeJoin("https://evil.example/teams.microsoft.com"), "")

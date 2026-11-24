@@ -145,8 +145,12 @@ class Auth:
 
 
 def logout():
-    # The service holds tokens in memory, so stop it before dropping the cache.
+    # The service holds tokens in memory, so it must be down before the cache goes.
     subprocess.run(["systemctl", "--user", "stop", "m365bar.service"], check=False)
+    state = subprocess.run(["systemctl", "--user", "is-active", "m365bar.service"],
+                           capture_output=True, text=True).stdout.strip()
+    if state not in ("inactive", "failed", "unknown"):
+        sys.exit(f"m365bar: service is still {state or 'in an unknown state'}; tokens left in place")
     TOKEN_CACHE.unlink(missing_ok=True)
     print("m365bar service stopped and tokens removed; `m365bar login` then start the service again")
 
@@ -338,7 +342,9 @@ def run(cfg: dict, once=False):
     signal.signal(signal.SIGUSR1, lambda *_: wake.set())
 
     data = {"events": [], "chats": [], "presence": {}}
-    feeds = {name: {"next": 0.0, "updated": 0, "error": "", "fails": 0} for name in FEEDS}
+    # "next" is the normal schedule (a forced refresh may skip it); "hold" is a
+    # server Retry-After deadline that nothing skips.
+    feeds = {name: {"next": 0.0, "hold": 0.0, "updated": 0, "error": "", "fails": 0} for name in FEEDS}
     auth_state = "ok"
     my_id = ""
     last_content, last_write = None, 0.0
@@ -354,14 +360,15 @@ def run(cfg: dict, once=False):
             for name, (fetch, key, interval_key) in FEEDS.items():
                 f = feeds[name]
                 now = time.monotonic()
-                if not forced and now < f["next"]:
+                if now < f["hold"] or (not forced and now < f["next"]):
                     continue
                 try:
                     data[key] = fetch(g, cfg, my_id)
                     f.update(updated=int(time.time() * 1000), error="", fails=0, next=now + cfg[interval_key])
                 except Throttled as e:
                     log(f"{name}:", e)
-                    f.update(error=str(e), next=now + e.retry_after + random.uniform(1, 5))
+                    f["hold"] = f["next"] = now + e.retry_after + random.uniform(1, 5)
+                    f["error"] = str(e)
                 except AuthNeeded:
                     raise
                 except Exception as e:  # network blips: keep last good data, flag it

@@ -86,7 +86,11 @@ function compute(state, now, opts) {
   var cur = current(events, now)
   var next = upcoming(events, now)
   var presence = state.presence || {}
-  var inCall = CALL_ACTIVITIES.indexOf(presence.activity) >= 0
+  var updated = state.updated || {}
+  var errors = state.errors || {}
+  // Presence is only trusted while fresh; a cached "InACall" must not stick.
+  var presenceFresh = !!updated.presence && now - updated.presence <= (opts.presenceStaleMinutes || 5) * MIN
+  var inCall = presenceFresh && CALL_ACTIVITIES.indexOf(presence.activity) >= 0
   var slides = []
   var joinUrl = ""
 
@@ -136,10 +140,9 @@ function compute(state, now, opts) {
     })
   }
   if (!lines.length) lines.push("No meetings in the next " + (opts.lookaheadHours || 18) + "h")
-  var updated = (state.updated || {}).calendar
-  var error = (state.errors || {}).calendar
-  if (updated && now - updated > staleAfter) lines.push("", "⚠ calendar stale since " + clock(updated))
-  if (error) lines.push("", "⚠ " + error)
+  if (updated.calendar && now - updated.calendar > staleAfter) lines.push("", "⚠ calendar stale since " + clock(updated.calendar))
+  if (errors.calendar) lines.push("", "⚠ calendar: " + errors.calendar)
+  if (errors.presence) lines.push("", "⚠ presence: " + errors.presence)
   lines.push("", "Click: calendar · Right: join" + (joinUrl ? "" : " (none)") + " · Middle: refresh")
 
   return {
