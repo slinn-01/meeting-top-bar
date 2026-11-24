@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "steve.meetings",
+  "name": "Meetings",
+  "version": "0.1.0",
+  "author": "steve",
+  "description": "Current and next Microsoft 365 meeting, from the m365bar daemon",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Meetings",
+    "description": "Current and next Microsoft 365 meeting",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "centerBegin"
+  }
+}

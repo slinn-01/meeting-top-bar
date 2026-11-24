@@ -1,0 +1,11 @@
+# ~/.config/m365bar/config.toml
+client_id = ""            # Entra app registration (Application/client ID)
+tenant = "organizations"  # or your tenant ID / domain
+
+lookahead_hours = 18
+calendar_interval = 60    # seconds
+chat_interval = 20
+presence_interval = 30
+include_free = false      # show events marked Free (focus blocks)
+include_tentative = true
+chat_history = 8

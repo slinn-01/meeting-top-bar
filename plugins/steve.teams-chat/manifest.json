@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "steve.teams-chat",
+  "name": "Teams chat",
+  "version": "0.1.0",
+  "author": "steve",
+  "description": "Latest Teams chat message, Twitch-chat style, from the m365bar daemon",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Teams chat",
+    "description": "Latest Teams chat message",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

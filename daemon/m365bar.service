@@ -1,0 +1,13 @@
+[Unit]
+Description=m365bar: Microsoft 365 calendar/Teams state for the Omarchy bar
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/m365bar run
+Restart=on-failure
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target
